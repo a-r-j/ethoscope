@@ -12,17 +12,77 @@ import cv2
 import numpy as np
 import optparse
 import logging
-import traceback
+from ethoscope.utils.debug import EthoscopeException
+from ethoscope.core.roi import ROI
+
+class YmazeDrawer(DefaultDrawer):
+    def __init__(self, video_out= None, draw_frames=False, targets=None):
+        """
+        A template class to annotate and save the processed frames. It can also save the annotated frames in a video
+        file and/or display them in a new window. The :meth:`~ethoscope.drawers.drawers.BaseDrawer._annotate_frame`
+        abstract method defines how frames are annotated.
+
+        :param video_out: The path to the output file (.avi)
+        :type video_out: str
+        :param draw_frames: Whether frames should be displayed on the screen (a new window will be created).
+        :type draw_frames: bool
+        """
+        super(YmazeDrawer,self).__init__(video_out=video_out, draw_frames=draw_frames)
+        self._targets = targets
+
+
+
+    def _annotate_frame(self,img, positions, tracking_units):
+
+        if img is None:
+            return
+
+        if self._targets is not None:
+            targets = self._targets
+
+            if len(targets) != 3:
+                logging.error("Found a different number of targets")
+            cv2.circle(img, (int(targets[0][0]),int(targets[0][1])),10, (0,0,255), 1, cv2.CV_AA)
+            cv2.circle(img, (int(targets[1][0]),int(targets[1][1])),10, (0,0,255), 1, cv2.CV_AA)
+            cv2.circle(img, (int(targets[2][0]),int(targets[2][1])),10, (0,0,255), 1, cv2.CV_AA)
+
+        #img = cv2.drawKeypoints(img, keypoints, np.array([]), (0 ,0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+        for track_u in tracking_units:
+
+            x,y = track_u.roi.offset
+            y += track_u.roi.rectangle[3]/2
+
+
+            cv2.putText(img, str(track_u.roi.idx), (x,y), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (255,255,0))
+
+            black_colour = (0, 0,0)
+            roi_colour = (0, 255,0)
+            cv2.drawContours(img,[track_u.roi.polygon],-1, black_colour, 3, cv2.CV_AA)
+            cv2.drawContours(img,[track_u.roi.polygon],-1, roi_colour, 1, cv2.CV_AA)
+
+            try:
+                pos_list = positions[track_u.roi.idx]
+            except KeyError:
+                continue
+
+            for pos in pos_list:
+                colour = (0 ,0, 255)
+                try:
+                    if pos["has_interacted"]:
+                        colour = (255, 0,0)
+                except KeyError:
+                    pass
+
+                cv2.ellipse(img,((pos["x"],pos["y"]), (pos["w"],pos["h"]), pos["phi"]),black_colour,3,cv2.CV_AA)
+                cv2.ellipse(img,((pos["x"],pos["y"]), (pos["w"],pos["h"]), pos["phi"]),colour,1,cv2.CV_AA)
+
 
 
 class YMazeTracker(BaseTracker):
-
     def __init__(self, roi, data=None):
         self._accum = None
         self._alpha = 0.001
         super(YMazeTracker, self).__init__(roi, data)
-
-
 
     def _filter_contours(self, contours, min_area =50, max_area=200):
         out = []
@@ -35,10 +95,10 @@ class YMazeTracker(BaseTracker):
 
             out.append(c)
         return out
+
     def _find_position(self, img, mask,t):
         grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return self._track(img, grey, mask, t)
-
 
     def _track(self, img,  grey, mask, t):
         if self._accum is None:
@@ -87,57 +147,145 @@ class YMazeTracker(BaseTracker):
         return [out]
 
 
-class Ymaze(TargetGridROIBuilder):
-    _vertical_spacing =  0
-    _horizontal_spacing =  0
-    _n_rows = 1
-    _n_cols = 1
-    _top_margin =  0.05
-    _bottom_margin = 0.05
-    _left_margin = 0.05
-    _right_margin = 0.05
 
-    def _find_blobs(self, im, scoring_fun):
 
-        # Read image
-        grey = cv2.cvtColor(im, cv2.IMREAD_GRAYSCALE)
-        # Set up the detector with default parameters.
-        detector = cv2.SimpleBlobDetector()
-        print "Hello"
+class YmazeROIBuilder(TargetGridROIBuilder):
+    _description = {"overview": "The default Y maze ROI builder",
+                    "arguments": []}
 
-        # Detect blobs.
-        keypoints = detector.detect(grey)
 
-        # Draw detected blobs as red circles.
-        # cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS ensures the size of the circle corresponds to the size of blob
-        im_with_keypoints = cv2.drawKeypoints(im, keypoints, np.array([]), (0,0,255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
-        # Show keypoints
-        cv2.imshow("Keypoints", im_with_keypoints)
-        cv2.waitKey(0)
-        # grey= cv2.cvtColor(im,cv2.COLOR_BGR2GRAY)
-        # rad = int(self._adaptive_med_rad * im.shape[1])
-        # if rad % 2 == 0:
-        #     rad += 1
+    def __init__(self):
+        super(YmazeROIBuilder, self).__init__(n_rows=1,
+                                                               n_cols=1,
+                                                               top_margin=0.3,
+                                                               bottom_margin =0.3,
+                                                               left_margin = 0.3,
+                                                               right_margin = 0.3,
+                                                               horizontal_fill = 1,
+                                                               vertical_fill= 1
+                                            )
+
+
+    def _find_target_coordinates(self, img):
+        params = cv2.SimpleBlobDetector_Params()
+        # Change thresholds
+        params.minThreshold = 0;
+        params.maxThreshold = 50;
+
+        # Filter by Area.
+        params.filterByArea = True
+        params.minArea = 1200
+
+        # Filter by Circularity
+        params.filterByCircularity = True
+        params.minCircularity = 0.5
         #
-        # med = np.median(grey)
-        # scale = 255/(med)
-        # cv2.multiply(grey,scale,dst=grey)
-        # bin = np.copy(grey)
-        # score_map = np.zeros_like(bin)
-        # for t in range(0, 255,5):
-        #     cv2.threshold(grey, t, 255,cv2.THRESH_BINARY_INV,bin)
-        #     if np.count_nonzero(bin) > 0.7 * im.shape[0] * im.shape[1]:
-        #         continue
-        #     contours, h = cv2.findContours(bin,cv2.RETR_EXTERNAL,cv2.cv.CV_CHAIN_APPROX_SIMPLE)
-        #     bin.fill(0)
-        #     for c in contours:
-        #         score = scoring_fun(c, im)
-        #         if score >0:
-        #             cv2.drawContours(bin,[c],0,score,-1)
-        #     cv2.add(bin, score_map,score_map)
-        # return score_map
+        # Filter by Convexity
+        params.filterByConvexity = True
+        params.minConvexity = 0.5
+        #
+        # # Filter by Inertia
+        # params.filterByInertia = True
+        # params.minInertiaRatio = 0.01
 
+        detector = cv2.SimpleBlobDetector(params)
+        # Detect blobs.
+        keypoints = detector.detect(img)
+        return keypoints
+
+    def _sort(self, keypoints):
+        #-----------A
+        #-----------
+        #C----------B
+
+        # initialize the three targets that we want to found
+        sorted_a = cv2.KeyPoint()
+        sorted_b = cv2.KeyPoint()
+        sorted_c = cv2.KeyPoint()
+
+        # find the minimum x and the minimum y coordinate between the three targets
+        minx = min(keypoint.pt[0] for keypoint in keypoints)
+        miny = min(keypoint.pt[1] for keypoint in keypoints)
+
+        # sort the targets; c is the target that has minimum x and a is the target that has minimum y
+
+        for keypoint in keypoints:
+            if keypoint.pt[0] == minx:
+                sorted_c = keypoint
+            if keypoint.pt[1] == miny:
+                sorted_a = keypoint
+
+        # b is the remaining point
+        sorted_b = np.setdiff1d(keypoints, [sorted_a, sorted_c])[0]
+
+
+        return np.array([sorted_a.pt, sorted_b.pt, sorted_c.pt], dtype=np.float32)
+
+    def _rois_from_img(self,img):
+        self._targets = self._find_target_coordinates(img)
+        sorted_src_pts = self._sort(self._targets)
+        dst_points = np.array([(0,-1),
+                               (0,0),
+                               (-1,0)], dtype=np.float32)
+        wrap_mat = cv2.getAffineTransform(dst_points, sorted_src_pts)
+
+        rectangles = self._make_grid(self._n_cols, self._n_rows,
+                                     self._top_margin, self._bottom_margin,
+                                     self._left_margin,self._right_margin,
+                                     self._horizontal_fill, self._vertical_fill)
+
+        shift = np.dot(wrap_mat, [1,1,0]) - sorted_src_pts[1] # point 1 is the ref, at 0,0
+        rois = []
+        for i,r in enumerate(rectangles):
+            r = np.append(r, np.zeros((4,1)), axis=1)
+            mapped_rectangle = np.dot(wrap_mat, r.T).T
+            mapped_rectangle -= shift
+            ct = mapped_rectangle.reshape((1,4,2)).astype(np.int32)
+            cv2.drawContours(img,[ct], -1, (255,0,0),1,cv2.CV_AA)
+            rois.append(ROI(ct, idx=i+1))
+
+            # cv2.imshow("dbg",img)
+            # cv2.waitKey(0)
+        return rois, sorted_src_pts
+
+    def build(self, input):
+        """
+        Uses an input (image or camera) to build ROIs.
+        When a camera is used, several frames are acquired and averaged to build a reference image.
+
+        :param input: Either a camera object, or an image.
+        :type input: :class:`~ethoscope.hardware.input.camera.BaseCamera` or :class:`~numpy.ndarray`
+        :return: list(:class:`~ethoscope.core.roi.ROI`)
+        """
+
+        accum = []
+        if isinstance(input, np.ndarray):
+            accum = np.copy(input)
+
+        else:
+            for i, (_, frame) in enumerate(input):
+                accum.append(frame)
+                if i  >= 5:
+                    break
+
+            accum = np.median(np.array(accum),0).astype(np.uint8)
+        try:
+            rois, sorted_targets = self._rois_from_img(accum)
+
+        except Exception as e:
+            if not isinstance(input, np.ndarray):
+                del input
+            raise e
+
+        rois_w_no_value = [r for r in rois if r.value is None]
+
+        if len(rois_w_no_value) > 0:
+            rois = self._spatial_sorting(rois)
+        else:
+            rois = self._value_sorting(rois)
+
+        return rois, sorted_targets
 
 
 if __name__ == "__main__":
@@ -176,8 +324,9 @@ if __name__ == "__main__":
 
     #accum = np.median(np.array(accum),0).astype(np.uint8)
     # cv2.imshow('window', my_image)
-    roi_builder = Ymaze()
-    rois = roi_builder.build(cam)
+
+    roi_builder = YmazeROIBuilder()
+    rois, sorted_targets = roi_builder.build(cam)
 
     logging.info("Initialising monitor")
 
@@ -195,13 +344,12 @@ if __name__ == "__main__":
     if option_dict["draw_every"] > 0:
         draw_frames = True
 
-    drawer = DefaultDrawer('~/Desktop/test_video.MP4', draw_frames = True)
+    drawer = YmazeDrawer('~/Desktop/test_video.MP4', draw_frames=True, targets=sorted_targets)
 
     monit = Monitor(cam, YMazeTracker, rois)
 
 
     with SQLiteResultWriter(option_dict["out"], rois) as rw:
         monit.run(None, drawer)
-
 
     logging.info("Stopping Monitor")
